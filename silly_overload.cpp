@@ -237,3 +237,9 @@ void lol() {
     test::Entry(&out, args1, 2);
     test::Entry(&out, args0, 0);
 }
+
+int main(int argc, char *argv[])
+{
+    lol();
+    return 0;
+}
