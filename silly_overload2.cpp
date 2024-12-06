@@ -4,6 +4,11 @@
 #include <new>
 #include <string>
 
+template<typename T>
+struct Tag {
+    using type = T;
+};
+
 template<typename...Ts>
 struct TypeList {
     static constexpr size_t size = sizeof...(Ts);
@@ -17,16 +22,16 @@ struct ErasedTupleLeaf {
 template<size_t Is, typename T>
 struct ErasedTupleLeaf<Is, T&> {
     T* value;
-    constexpr ErasedTupleLeaf(T& r) noexcept : value(&r) {}
 };
 
 template<size_t I, typename T>
-auto&& ErasedTupleGet(ErasedTupleLeaf<I, T>& tup) {
-    if constexpr (std::is_reference_v<T>) {
-        return std::move(*tup.value);
-    } else {
-        return std::move(tup.value);
-    }
+decltype(auto) ErasedTupleGet(ErasedTupleLeaf<I, T&>& tup) {
+    return *tup.value;
+}
+
+template<size_t I, typename T>
+decltype(auto) ErasedTupleGet(ErasedTupleLeaf<I, T>& tup) {
+    return std::move(tup.value);
 }
 
 template<typename T, typename...Args>
@@ -45,8 +50,8 @@ constexpr size_t erased_tuple_size_of(TypeList<Args...>) {
 }
 
 template<typename...Args, typename...Leafs>
-void* erased_tuple_emplace(TypeList<Args...>, void* data, Leafs&...args) {
-    return new(data) ErasedTuple<Args...>{std::move(args)...};
+void erased_tuple_emplace(TypeList<Args...>, void* data, Leafs&...args) {
+    new(data) ErasedTuple<Args...>{std::move(args)...};
 }
 
 template<typename...Args>
@@ -56,7 +61,7 @@ void erased_tuple_destroy(TypeList<Args...>, void* data) noexcept {
 }
 
 template<size_t I, typename...Args>
-auto&& erased_tuple_get(TypeList<Args...>, void* data) {
+decltype(auto) erased_tuple_get(TypeList<Args...>, void* data) {
     return ErasedTupleGet<I>(*static_cast<ErasedTuple<Args...>*>(data));
 }
 
@@ -84,12 +89,15 @@ constexpr size_t _hash_type() {
 
 template<size_t pos, typename Head, typename...Tail>
 auto arg_at_pos(TypeList<Head, Tail...>) {
-    if constexpr (!pos) return Head{};
+    if constexpr (!pos) return Tag<Head>{};
     else {
         static_assert(sizeof...(Tail));
         return arg_at_pos<pos - 1>(TypeList<Tail...>{});
     }
 }
+
+template<size_t I, typename List>
+using arg_at_pos_t = typename decltype(arg_at_pos<I>(List{}))::type;
 
 template<typename P, typename F>
 struct SeparationResult {
@@ -134,32 +142,32 @@ constexpr bool conflicting_overloads = false;
 
 template<size_t argc, size_t pos, class Pivot, class...Same, class...Other, class...Ready>
 size_t choose_overload(
-    void** out, Arg* args,
+    void* storage, Arg* args,
     TypeList<Pivot, Same...> match,
     TypeList<Other...> miss,
     Ready&...ready)
 {
-    using CurrentArg = decltype(arg_at_pos<pos>(Pivot{}));
+    using CurrentArg = arg_at_pos_t<pos, Pivot>;
     ErasedTupleLeaf<pos, CurrentArg> arg;
     if (args[pos].get(arg.value)) {
         if constexpr (pos == argc - 1) {
             if constexpr (sizeof...(Same)) {
                 static_assert(conflicting_overloads<Pivot, Same...>);
             }
-            *out = erased_tuple_emplace(Pivot{}, *out, ready..., arg);
+            erased_tuple_emplace(Pivot{}, storage, ready..., arg);
             return _hash_type<Pivot>();
         } else {
             using NextArg = decltype(arg_at_pos<pos + 1>(Pivot{}));
             using Next = separated_t<SameArgAtPos<pos + 1, NextArg>, TypeList<Pivot, Same...>>;
             return choose_overload<argc, pos + 1>(
-                out, args, typename Next::pass{}, typename Next::fail{}, ready..., arg);
+                storage, args, typename Next::pass{}, typename Next::fail{}, ready..., arg);
         }
     } else if constexpr (miss.size) {
         using NewPivot = decltype(first(TypeList<Other...>{}));
         using ChangeArg = decltype(arg_at_pos<pos>(NewPivot{}));
         using ChangePivot = separated_t<SameArgAtPos<pos, ChangeArg>, TypeList<Other...>>;
         return choose_overload<argc, pos>(
-            out, args, typename ChangePivot::pass{}, typename ChangePivot::fail{}, ready...);
+            storage, args, typename ChangePivot::pass{}, typename ChangePivot::fail{}, ready...);
     } else {
         return 0;
     }
@@ -189,7 +197,7 @@ struct CanBeCalledWith {
 
 template<typename R, typename T, typename...Args, size_t...Is>
 bool do_call(
-    Arg* out, size_t signatureHash, void* super_tuple,
+    Arg* out, size_t signatureHash, void* erased,
     T* self, R(T::*method)(Args...), std::index_sequence<Is...>)
 {
     using Signature = TypeList<Args...>;
@@ -197,15 +205,15 @@ bool do_call(
     if (signatureHash == selfHash) {
         try {
             if constexpr (std::is_void_v<R>) {
-                (self->*method)(erased_tuple_get<Is>(Signature{}, super_tuple)...);
+                (self->*method)(erased_tuple_get<Is>(Signature{}, erased)...);
             } else {
-                auto r = (self->*method)(erased_tuple_get<Is>(Signature{}, super_tuple)...);
+                auto r = (self->*method)(erased_tuple_get<Is>(Signature{}, erased)...); //NOLINT
                 if (out) out->set(std::move(r));
             }
-            erased_tuple_destroy(Signature{}, super_tuple);
+            erased_tuple_destroy(Signature{}, erased);
             return true;
         } catch (...) {
-            erased_tuple_destroy(Signature{}, super_tuple);
+            erased_tuple_destroy(Signature{}, erased);
             throw;
         }
     } else {
@@ -251,34 +259,33 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
     constexpr auto storage_size = max_of(erased_tuple_size_of(
         typename inspect_method<decltype(methods)>::Args{})...);
     alignas(std::max_align_t) char storage[storage_size];
-    void* storage_ptr = &storage;
-    void** erased_args = &storage_ptr;
     size_t chosen_hash = 0; //hash for any signature must not be '0'
     // lambda will be called with std::integral_constant<size_t, i>
     // for i = 0; i < max_args; ++i
     const_for_each(std::make_index_sequence<max_args + 1>(), [&](auto argc){
         if (!chosen_hash && size == argc.value) {
             using Callable = typename separated_t<CanBeCalledWith<argc.value>, ArgsListList>::pass;
-            if constexpr (Callable::size) {
+            constexpr size_t CallableCount = Callable::size;
+            if constexpr (CallableCount > 0) {
                 if constexpr (argc.value == 0) {
                     static_assert(Callable::size == 1 || conflicting_overloads<Callable>);
                     using Method = decltype(first(Callable{}));
-                    *erased_args = erased_tuple_emplace(Method{}, *erased_args);
+                    erased_tuple_emplace(Method{}, storage);
                     chosen_hash = _hash_type<Method>();
                 } else {
                     using First = decltype(first(Callable{}));
                     using Arg0 = decltype(arg_at_pos<0>(First{}));
                     using InitialSplit = separated_t<SameArgAtPos<0, Arg0>, Callable>;
                     chosen_hash = choose_overload<argc, 0>(
-                        erased_args, args, typename InitialSplit::pass{}, typename InitialSplit::fail{});
+                        storage, args, typename InitialSplit::pass{}, typename InitialSplit::fail{});
                 }
             } else {
-                throw "Error: not overload for such argument count";
+                throw "Error: not overload for such argument count (argc)";
             }
         }
     });
     if (chosen_hash) {
-        (do_call(out, chosen_hash, *erased_args, self, methods, std::make_index_sequence<args_of<methods>::size>()) || ...);
+        (do_call(out, chosen_hash, storage, self, methods, std::make_index_sequence<args_of<methods>::size>()) || ...);
     } else {
         throw "Error: could not match any overload";
     }
@@ -286,8 +293,12 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
 
 template<typename T>
 bool Arg::get(T& v) {
-    static int lol = 0;
-    v = lol++;
+    static int lol = 123;
+    if constexpr (std::is_pointer_v<T>) {
+        v = &lol;
+    } else {
+        v = {};
+    }
     return true;
 }
 
@@ -300,7 +311,7 @@ struct Victim {
     int a(int x) {
         return x;
     }
-    int b(int x, int y) {
+    int b(int& x, int y) {
         return x + y;
     }
     int c(bool x) {
