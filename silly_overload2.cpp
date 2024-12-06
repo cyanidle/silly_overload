@@ -69,6 +69,7 @@ decltype(auto) erased_tuple_get(TypeList<Args...>, void* data) {
 }
 
 struct Arg {
+    int self{};
     template<typename T> bool get(T& v);
     template<typename T> void set(T);
 };
@@ -236,14 +237,29 @@ constexpr void const_for_each(std::index_sequence<Is...>, Fn f) {
 template<auto m>
 using args_of = typename inspect_method<decltype(m)>::Args;
 
+constexpr bool _check_signatures(const size_t* hashes, size_t count) {
+    auto end = hashes + count;
+    for (auto i = hashes; i != end; ++i) {
+        if (!*i) return false;
+        for (auto j = i + 1; j != end; ++j) {
+            if (*i == *j) return false;
+        }
+    }
+    return true;
+}
+
 template<typename T, auto...methods>
 void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
-    static_assert(sizeof...(methods));
+    constexpr size_t methods_count = sizeof...(methods);
+    static_assert(methods_count, "Empty overload set");
     constexpr size_t max_args = max_of(args_of<methods>::size...);
     using ArgsListList = TypeList<args_of<methods>...>;
+    constexpr size_t all_hashes[] = {_hash_type<args_of<methods>>()...};
+    static_assert(_check_signatures(all_hashes, methods_count),
+                  "Invalid overload signatures: Collisions found");
     constexpr auto storage_size = max_of(erased_tuple_size_of(
         typename inspect_method<decltype(methods)>::Args{})...);
-    char storage[storage_size];
+    alignas(std::max_align_t) char storage[storage_size];
     void* storage_ptr = &storage;
     void** erased_args = &storage_ptr;
     size_t chosen_hash = 0; //hash for any signature must not be '0'
@@ -279,18 +295,19 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
 
 template<typename T>
 bool Arg::get(T& v) {
-    v = {};
+    static int lol = 0;
+    v = lol++;
     return true;
 }
 
 template<typename T>
-void Arg::set(T) {
-
+void Arg::set(T v) {
+    self = v;
 }
 
 struct Victim {
-    int a(std::string_view x) {
-        return x.size();
+    int a(int x) {
+        return x;
     }
     int b(int x, int y) {
         return x + y;
