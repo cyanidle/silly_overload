@@ -26,7 +26,7 @@ struct ErasedTupleLeaf<Is, T&> {
 
 template<size_t I, typename T>
 decltype(auto) ErasedTupleGet(ErasedTupleLeaf<I, T&>& tup) {
-    return *tup.value;
+    return *tup.value; //NOLINT
 }
 
 template<size_t I, typename T>
@@ -155,7 +155,8 @@ size_t choose_overload(
                 static_assert(conflicting_overloads<Pivot, Same...>);
             }
             erased_tuple_emplace(Pivot{}, storage, ready..., arg);
-            return _hash_type<Pivot>();
+            constexpr size_t result = _hash_type<Pivot>();
+            return result;
         } else {
             using NextArg = decltype(arg_at_pos<pos + 1>(Pivot{}));
             using Next = separated_t<SameArgAtPos<pos + 1, NextArg>, TypeList<Pivot, Same...>>;
@@ -271,7 +272,8 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
                     static_assert(Callable::size == 1 || conflicting_overloads<Callable>);
                     using Method = decltype(first(Callable{}));
                     erased_tuple_emplace(Method{}, storage);
-                    chosen_hash = _hash_type<Method>();
+                    constexpr size_t result = _hash_type<Method>();
+                    chosen_hash = result;
                 } else {
                     using First = decltype(first(Callable{}));
                     using Arg0 = decltype(arg_at_pos<0>(First{}));
