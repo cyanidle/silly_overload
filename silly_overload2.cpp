@@ -12,36 +12,29 @@ struct TypeList {
 template<size_t Is, typename T>
 struct ErasedTupleLeaf {
     T value;
-
-    template<typename U>
-    ErasedTupleLeaf(U&& v) noexcept(std::is_nothrow_constructible_v<T, U>)
-        : value(std::forward<U>(v)) {}
-    friend T Get(ErasedTupleLeaf& self, std::integral_constant<size_t, Is>) noexcept {
-        return std::move(self.value);
-    }
 };
 
 template<size_t Is, typename T>
 struct ErasedTupleLeaf<Is, T&> {
     T* value;
-
-    ErasedTupleLeaf(T& r) noexcept : value(&r) {}
-    friend T& Get(ErasedTupleLeaf& self, std::integral_constant<size_t, Is>) noexcept {
-        return *self.value;
-    }
+    constexpr ErasedTupleLeaf(T& r) noexcept : value(&r) {}
 };
+
+template<size_t I, typename T>
+auto&& ErasedTupleGet(ErasedTupleLeaf<I, T>& tup) {
+    if constexpr (std::is_reference_v<T>) {
+        return std::move(*tup.value);
+    } else {
+        return std::move(tup.value);
+    }
+}
 
 template<typename T, typename...Args>
 struct _ErasedTuple;
 
 template<size_t...Is, typename...Args>
 struct _ErasedTuple<std::index_sequence<Is...>, Args...> : ErasedTupleLeaf<Is, Args>...
-{
-    template<typename...A>
-    _ErasedTuple(A&&...a) :
-        ErasedTupleLeaf<Is, Args>(std::forward<A>(a))...
-    {}
-};
+{};
 
 template<typename...Args>
 using ErasedTuple = _ErasedTuple<std::make_index_sequence<sizeof...(Args)>, Args...>;
@@ -51,9 +44,9 @@ constexpr size_t erased_tuple_size_of(TypeList<Args...>) {
     return sizeof(ErasedTuple<Args...>);
 }
 
-template<typename...Args, typename...Passed>
-void* erased_tuple_emplace(TypeList<Args...>, void* data, Passed&&...args) {
-    return new(data) ErasedTuple<Args...>(std::forward<Passed>(args)...);
+template<typename...Args, typename...Leafs>
+void* erased_tuple_emplace(TypeList<Args...>, void* data, Leafs&...args) {
+    return new(data) ErasedTuple<Args...>{std::move(args)...};
 }
 
 template<typename...Args>
@@ -63,9 +56,8 @@ void erased_tuple_destroy(TypeList<Args...>, void* data) noexcept {
 }
 
 template<size_t I, typename...Args>
-decltype(auto) erased_tuple_get(TypeList<Args...>, void* data) {
-    using Tuple = ErasedTuple<Args...>;
-    return Get(*static_cast<Tuple*>(data), std::integral_constant<size_t, I>{});
+auto&& erased_tuple_get(TypeList<Args...>, void* data) {
+    return ErasedTupleGet<I>(*static_cast<ErasedTuple<Args...>*>(data));
 }
 
 struct Arg {
@@ -148,13 +140,13 @@ size_t choose_overload(
     Ready&...ready)
 {
     using CurrentArg = decltype(arg_at_pos<pos>(Pivot{}));
-    CurrentArg arg;
-    if (args[pos].get(arg)) {
+    ErasedTupleLeaf<pos, CurrentArg> arg;
+    if (args[pos].get(arg.value)) {
         if constexpr (pos == argc - 1) {
             if constexpr (sizeof...(Same)) {
                 static_assert(conflicting_overloads<Pivot, Same...>);
             }
-            *out = erased_tuple_emplace(Pivot{}, *out, std::move(ready)..., std::move(arg));
+            *out = erased_tuple_emplace(Pivot{}, *out, ready..., arg);
             return _hash_type<Pivot>();
         } else {
             using NextArg = decltype(arg_at_pos<pos + 1>(Pivot{}));
@@ -198,8 +190,7 @@ struct CanBeCalledWith {
 template<typename R, typename T, typename...Args, size_t...Is>
 bool do_call(
     Arg* out, size_t signatureHash, void* super_tuple,
-    T* self, R(T::*method)(Args...), std::index_sequence<Is...>
-    )
+    T* self, R(T::*method)(Args...), std::index_sequence<Is...>)
 {
     using Signature = TypeList<Args...>;
     constexpr size_t selfHash = _hash_type<Signature>();
@@ -269,7 +260,7 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
         if (!chosen_hash && size == argc.value) {
             using Callable = typename separated_t<CanBeCalledWith<argc.value>, ArgsListList>::pass;
             if constexpr (Callable::size) {
-                if constexpr (!argc.value) {
+                if constexpr (argc.value == 0) {
                     static_assert(Callable::size == 1 || conflicting_overloads<Callable>);
                     using Method = decltype(first(Callable{}));
                     *erased_args = erased_tuple_emplace(Method{}, *erased_args);
