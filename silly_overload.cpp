@@ -1,9 +1,7 @@
-
+#include <cstdlib>
 #include <utility>
 #include <type_traits>
 #include <cstddef>
-
-namespace test {
 
 template<typename...Ts>
 struct TypeList {};
@@ -24,20 +22,37 @@ struct OverloadSet {
     static constexpr size_t count = sizeof...(methods);
 };
 
-template<typename Pred, auto...p, auto...f>
-auto SeparateOverloads(OverloadSet<>, OverloadSet<p...>, OverloadSet<f...>)
-    -> SeparationResult<OverloadSet<p...>, OverloadSet<f...>>;
-
-template<typename Pred, auto head, auto...tail, auto...p, auto...f>
-auto SeparateOverloads(OverloadSet<head, tail...>, OverloadSet<p...>, OverloadSet<f...>) {
-    if constexpr (Pred::check(head)) {
+template<typename Pred, auto head, auto...methods, auto...p, auto...f>
+auto SeparateOverloads(OverloadSet<head, methods...>, OverloadSet<p...>, OverloadSet<f...>) {
+    if constexpr (!sizeof...(methods)) {
+        if constexpr (Pred::check(head)) {
+            return SeparationResult<OverloadSet<p..., head>, OverloadSet<f...>>{};
+        } else {
+            return SeparationResult<OverloadSet<p...>, OverloadSet<f..., head>>{};
+        }
+    } else if constexpr (Pred::check(head)) {
         return SeparateOverloads<Pred>(
-            OverloadSet<tail...>{}, OverloadSet<p..., head>{}, OverloadSet<f...>{});
+            OverloadSet<methods...>{}, OverloadSet<p..., head>{}, OverloadSet<f...>{});
     } else {
         return SeparateOverloads<Pred>(
-            OverloadSet<tail...>{}, OverloadSet<p...>{}, OverloadSet<f..., head>{});
+            OverloadSet<methods...>{}, OverloadSet<p...>{}, OverloadSet<f..., head>{});
     }
 }
+
+template<auto...l, auto...r, typename...Tail>
+auto concat(OverloadSet<l...>, OverloadSet<r...>, Tail...) {
+    if constexpr (!sizeof...(Tail)) {
+        return OverloadSet<l..., r...>{};
+    } else {
+        return concat(OverloadSet<l..., r...>{}, Tail{}...);
+    }
+}
+
+
+template<typename Pred, auto...methods>
+auto FilterOverloads(OverloadSet<methods...>)
+    -> decltype(concat(std::conditional_t<Pred::check(methods), OverloadSet<methods>, OverloadSet<>>{}...));
+
 
 // resulting type has two typedefs
 // pass: all methods passing predicate
@@ -45,24 +60,18 @@ auto SeparateOverloads(OverloadSet<head, tail...>, OverloadSet<p...>, OverloadSe
 template<typename Pred, typename Set>
 using separated_t = decltype(SeparateOverloads<Pred>(Set{}, OverloadSet<>{}, OverloadSet<>{}));
 
+template<typename Pred, typename Set>
+using filtered_t = decltype(FilterOverloads<Pred>(Set{}));
+
 // emulate generic deserializable value
 struct Arg {
-    bool is_bool{};
     template<typename T>
     bool get(T& v) {
-        static int count = 0;
-        if (std::is_same_v<T, bool>) {
-            v = true;
-            return is_bool;
-        } else {
-            v = count++;
-            return !is_bool;
-        }
+        v = {};
+        return rand() & 1;
     }
     template<typename T>
-    bool set(T) {
-        return true;
-    }
+    void set(T) {}
 };
 
 template<typename...Ms>
@@ -133,7 +142,7 @@ void call_one(Arg* out, T* self, Arg* args, R(T::*method)(Args...), std::index_s
     call_one_ready(out, self, method, cast<Args>(args[Is])...);
 }
 
-template<auto first, auto...rest>
+template<auto first, auto...>
 constexpr auto get_first() {
     return first;
 }
@@ -169,7 +178,7 @@ bool choose_overload(
 }
 
 template<typename T, auto first, auto...rest>
-bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...>) {
+bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...> set) {
     constexpr size_t argc = argc_of(first);
     if constexpr (!argc || !sizeof...(rest)) {
         // special case 1: if no args -> choose first
@@ -191,7 +200,7 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
     // for i = 0; i < max_args; ++i
     const_for_each(std::make_index_sequence<max_args + 1>(), [&](auto argc){
         if (!hit && size == argc.value) {
-            using SameArgc = typename separated_t<CanBeCalledWith<argc.value>, OverloadSet<methods...>>::pass;
+            using SameArgc = filtered_t<CanBeCalledWith<argc.value>, OverloadSet<methods...>>;
             if constexpr (SameArgc::count) {
                 hit = call_any(out, self, args, SameArgc{});
             } else {
@@ -204,6 +213,9 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
     }
 }
 
+template<size_t>
+struct Test {};
+
 struct Victim {
     int a(int a, int b) {
         return a + b;
@@ -214,32 +226,70 @@ struct Victim {
     int c(int a, bool b) {
         return b ? a : -a;
     }
-    int d() {
-        return 0;
+    int d(Test<0>) {
+        return 1;
+    }
+    int d1(Test<1>) {
+        return 1;
+    }
+    int d2(Test<2>) {
+        return 1;
+    }
+    int d3(Test<3>) {
+        return 1;
+    }
+    int d4(Test<4>) {
+        return 1;
+    }
+    int d5(Test<5>) {
+        return 1;
+    }
+    int d6(Test<6>) {
+        return 1;
+    }
+    int d7(int, int, int, int, int, int, int, int, int, int) {
+        return 1;
+    }
+    int d8(bool, bool, bool, bool, bool, bool, bool, bool, bool, bool) {
+        return 1;
+    }
+    int d9(char, char, char, char, char, char, char, char, char, char) {
+        return 1;
+    }
+    int d10(int, int, int) {
+        return 1;
+    }
+    int d11(bool, bool, bool, bool, bool, bool) {
+        return 1;
+    }
+    int d12(char, char, char, char, char, char, char, char) {
+        return 1;
     }
 };
 
-void Entry(Arg* out, Arg* args, size_t count) {
-    using Overloads = OverloadSet<&Victim::a, &Victim::b, &Victim::c, &Victim::d>;
-    Victim v;
-    call(out, &v, args, count, Overloads{});
-}
-
-}
-
-void lol() {
-    using namespace test;
-    Arg out;
-    Arg args0[5] = {{false},{false}};
-    Arg args1[5] = {{false},{true}};
-    test::Entry(&out, args0, 2);
-    test::Entry(&out, args0, 1);
-    test::Entry(&out, args1, 2);
-    test::Entry(&out, args0, 0);
-}
-
-int main(int argc, char *argv[])
+int main()
 {
-    lol();
+    Arg out;
+    Arg args[5] = {};
+    using Overloads = OverloadSet<
+        &Victim::a,
+        &Victim::b,
+        &Victim::c,
+        &Victim::d,
+        &Victim::d1,
+        &Victim::d2,
+        &Victim::d3,
+        &Victim::d4,
+        &Victim::d5,
+        &Victim::d6,
+        &Victim::d7,
+        &Victim::d8,
+        &Victim::d9,
+        &Victim::d10,
+        &Victim::d11,
+        &Victim::d12>;
+    Victim obj;
+    call(&out, &obj, args, 1, Overloads{});
+    call(&out, &obj, args, 2, Overloads{});
     return 0;
 }
