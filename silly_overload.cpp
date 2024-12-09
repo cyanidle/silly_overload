@@ -11,57 +11,37 @@ constexpr size_t argc_of (R(C::*)(A...)) {
     return sizeof...(A);
 }
 
+template<auto...methods>
+struct OverloadSet {
+    static constexpr size_t count = sizeof...(methods);
+};
+
 template<typename P, typename F>
 struct SeparationResult {
     using pass = P;
     using fail = F;
 };
 
-template<auto...methods>
-struct OverloadSet {
-    static constexpr size_t count = sizeof...(methods);
+template<typename...T>
+struct concat;
+
+template<>
+struct concat<> {
+    using type = OverloadSet<>;
 };
 
-template<typename Pred, auto head, auto...methods, auto...p, auto...f>
-auto SeparateOverloads(OverloadSet<head, methods...>, OverloadSet<p...>, OverloadSet<f...>) {
-    if constexpr (!sizeof...(methods)) {
-        if constexpr (Pred::check(head)) {
-            return SeparationResult<OverloadSet<p..., head>, OverloadSet<f...>>{};
-        } else {
-            return SeparationResult<OverloadSet<p...>, OverloadSet<f..., head>>{};
-        }
-    } else if constexpr (Pred::check(head)) {
-        return SeparateOverloads<Pred>(
-            OverloadSet<methods...>{}, OverloadSet<p..., head>{}, OverloadSet<f...>{});
-    } else {
-        return SeparateOverloads<Pred>(
-            OverloadSet<methods...>{}, OverloadSet<p...>{}, OverloadSet<f..., head>{});
-    }
-}
+template<typename T>
+struct concat<T> {
+    using type = T;
+};
 
 template<auto...l, auto...r, typename...Tail>
-auto concat(OverloadSet<l...>, OverloadSet<r...>, Tail...) {
-    if constexpr (!sizeof...(Tail)) {
-        return OverloadSet<l..., r...>{};
-    } else {
-        return concat(OverloadSet<l..., r...>{}, Tail{}...);
-    }
-}
-
+struct concat<OverloadSet<l...>, OverloadSet<r...>, Tail...> {
+    using type = typename concat<OverloadSet<l..., r...>, Tail...>::type;
+};
 
 template<typename Pred, auto...methods>
-auto FilterOverloads(OverloadSet<methods...>)
-    -> decltype(concat(std::conditional_t<Pred::check(methods), OverloadSet<methods>, OverloadSet<>>{}...));
-
-
-// resulting type has two typedefs
-// pass: all methods passing predicate
-// fail: all methods failing predicate
-template<typename Pred, typename Set>
-using separated_t = decltype(SeparateOverloads<Pred>(Set{}, OverloadSet<>{}, OverloadSet<>{}));
-
-template<typename Pred, typename Set>
-using filtered_t = decltype(FilterOverloads<Pred>(Set{}));
+using filtered_t = typename concat<std::conditional_t<Pred::check(methods), OverloadSet<methods>, OverloadSet<>>...>::type;
 
 // emulate generic deserializable value
 struct Arg {
@@ -110,12 +90,12 @@ constexpr bool same_arg_at(R(C::*)(Args...))
     return std::is_same_v<T, decltype(item_at_idx<pos>(TypeList<Args...>{}))>;
 }
 
-template<size_t pos, typename T>
+template<size_t pos, typename T, bool is>
 struct SameArgAtPos {
 
     template<typename Other>
     static constexpr size_t check(Other) {
-        return same_arg_at<pos, T>(Other{});
+        return same_arg_at<pos, T>(Other{}) == is;
     }
 };
 
@@ -162,16 +142,16 @@ bool choose_overload(
             return true;
         } else {
             using NextArg =  decltype(arg_at_pos<pos + 1>(pivot));
-            using Next = separated_t<SameArgAtPos<pos + 1, NextArg>, OverloadSet<pivot, sameArg...>>;
-            return choose_overload<argc, pos + 1>(
-                out, self, args, typename Next::pass{}, typename Next::fail{}, ready..., arg);
+            using NextSame = filtered_t<SameArgAtPos<pos + 1, NextArg, true>, pivot, sameArg...>;
+            using NextOther = filtered_t<SameArgAtPos<pos + 1, NextArg, false>, pivot, sameArg...>;
+            return choose_overload<argc, pos + 1>(out, self, args, NextSame{}, NextOther{}, ready..., arg);
         }
     } else if constexpr (sizeof...(otherArg)) {
         constexpr auto new_pivot = get_first<otherArg...>();
         using ChangeArg = decltype(arg_at_pos<pos>(new_pivot));
-        using ChangePivot = separated_t<SameArgAtPos<pos, ChangeArg>, OverloadSet<otherArg...>>;
-        return choose_overload<argc, pos>(
-            out, self, args, typename ChangePivot::pass{}, typename ChangePivot::fail{}, ready...);
+        using ChangeSame = filtered_t<SameArgAtPos<pos, ChangeArg, true>, otherArg...>;
+        using ChangeOther = filtered_t<SameArgAtPos<pos, ChangeArg, false>, otherArg...>;
+        return choose_overload<argc, pos>(out, self, args, ChangeSame{}, ChangeOther{}, ready...);
     } else {
         return false;
     }
@@ -187,8 +167,9 @@ bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...> set) {
         return true;
     } else {
         using Arg0 = decltype(arg_at_pos<0>(first));
-        using InitialSplit = separated_t<SameArgAtPos<0, Arg0>, OverloadSet<first, rest...>>;
-        return choose_overload<argc, 0>(out, self, args, typename InitialSplit::pass{}, typename InitialSplit::fail{});
+        using Same = filtered_t<SameArgAtPos<0, Arg0, true>, first, rest...>;
+        using Other = filtered_t<SameArgAtPos<0, Arg0, false>, first, rest...>;
+        return choose_overload<argc, 0>(out, self, args, Same{}, Other{});
     }
 }
 
@@ -200,7 +181,7 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
     // for i = 0; i < max_args; ++i
     const_for_each(std::make_index_sequence<max_args + 1>(), [&](auto argc){
         if (!hit && size == argc.value) {
-            using SameArgc = filtered_t<CanBeCalledWith<argc.value>, OverloadSet<methods...>>;
+            using SameArgc = filtered_t<CanBeCalledWith<argc.value>, methods...>;
             if constexpr (SameArgc::count) {
                 hit = call_any(out, self, args, SameArgc{});
             } else {
