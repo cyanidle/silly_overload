@@ -11,37 +11,70 @@ constexpr size_t argc_of (R(C::*)(A...)) {
     return sizeof...(A);
 }
 
+template<auto method, typename Next>
+struct OverloadSet {};
+
+template<typename T> struct head;
+template<auto method, typename Tail> struct head<OverloadSet<method, Tail>> {
+    static constexpr auto value = method;
+};
+
+template<typename T> struct tail;
+template<auto method, typename Tail> struct tail<OverloadSet<method, Tail>> {
+    using type = Tail;
+};
+
+template<typename List>
+constexpr auto head_v = head<List>::value;
+
+template<typename List>
+using tail_t = typename tail<List>::type;
+
 template<auto...methods>
-struct OverloadSet {
-    static constexpr size_t count = sizeof...(methods);
-};
+struct make_overload_set;
 
-template<typename P, typename F>
-struct SeparationResult {
-    using pass = P;
-    using fail = F;
+template<auto head, auto...methods>
+struct make_overload_set<head, methods...> {
+    using type = OverloadSet<head, typename make_overload_set<methods...>::type>;
 };
-
-template<typename...T>
-struct concat;
 
 template<>
-struct concat<> {
-    using type = OverloadSet<>;
+struct make_overload_set<> {
+    using type = void;
 };
 
-template<typename T>
-struct concat<T> {
-    using type = T;
+template<auto...methods>
+using make_overload_set_t = typename make_overload_set<methods...>::type;
+
+template<bool pass, typename Pred, typename List>
+struct filter;
+
+template<typename Pred, auto method>
+struct filter<true, Pred, OverloadSet<method, void>>
+{
+    using type = OverloadSet<method, void>;
 };
 
-template<auto...l, auto...r, typename...Tail>
-struct concat<OverloadSet<l...>, OverloadSet<r...>, Tail...> {
-    using type = typename concat<OverloadSet<l..., r...>, Tail...>::type;
+template<typename Pred, auto method>
+struct filter<false, Pred, OverloadSet<method, void>>
+{
+    using type = void;
 };
 
-template<typename Pred, auto...methods>
-using filtered_t = typename concat<std::conditional_t<Pred::check(methods), OverloadSet<methods>, OverloadSet<>>...>::type;
+template<typename Pred, auto method, typename Tail>
+struct filter<true, Pred, OverloadSet<method, Tail>>
+{
+    using type = OverloadSet<method, typename filter<Pred::check(head_v<Tail>), Pred, Tail>::type>;
+};
+
+template<typename Pred, auto method, typename Tail>
+struct filter<false, Pred, OverloadSet<method, Tail>>
+{
+    using type = typename filter<Pred::check(head_v<Tail>), Pred, Tail>::type;
+};
+
+template<typename Pred, typename List>
+using filtered_t = typename filter<Pred::check(head_v<List>), Pred, List>::type;
 
 // emulate generic deserializable value
 struct Arg {
@@ -54,10 +87,13 @@ struct Arg {
     void set(T) {}
 };
 
-template<typename...Ms>
-constexpr size_t max_argc(Ms...methods) {
-    size_t res = 0;
-    ((argc_of(methods) > res && (res = argc_of(methods))), ...);
+template<auto method, typename Tail>
+constexpr size_t max_argc(OverloadSet<method, Tail>) {
+    size_t res = argc_of(method);
+    if constexpr (!std::is_void_v<Tail>) {
+        auto tail = max_argc(Tail{});
+        if (tail > res) res = tail;
+    }
     return res;
 }
 
@@ -127,9 +163,9 @@ constexpr auto get_first() {
     return first;
 }
 
-template<size_t argc, size_t pos, typename T, auto pivot, auto...other, typename...Ready>
+template<size_t argc, size_t pos, typename T, auto pivot, typename Tail, typename...Ready>
 bool choose_overload(
-    Arg* out, T* self, Arg* args, OverloadSet<pivot, other...>, Ready&...ready)
+    Arg* out, T* self, Arg* args, OverloadSet<pivot, Tail>, Ready&...ready)
 {
     using CurrentArg = decltype(arg_at_pos<pos>(pivot));
     CurrentArg arg;
@@ -137,24 +173,24 @@ bool choose_overload(
         if constexpr (pos == argc - 1) {
             call_one_ready(out, self, pivot, std::move(ready)..., arg);
             return true;
-        } else {
-            using NextArg =  decltype(arg_at_pos<pos + 1>(pivot));
-            using NextSame = filtered_t<SameArgAtPos<pos + 1, NextArg, true>, pivot, other...>;
-            return choose_overload<argc, pos + 1>(out, self, args, NextSame{}, ready..., arg);
+        } else  {
+            using NextArg = decltype(arg_at_pos<pos + 1>(pivot));
+            using NextSame = filtered_t<SameArgAtPos<pos + 1, NextArg, true>, OverloadSet<pivot, Tail>>;
+            return choose_overload<argc, pos + 1>(out, self, args, OverloadSet<pivot, NextSame>{}, ready..., arg);
         }
-    } else if constexpr (sizeof...(other)) {
-        using DifferentArg = filtered_t<SameArgAtPos<pos, CurrentArg, false>, other...>;
-        if constexpr (DifferentArg::count) {
+    } else if constexpr (!std::is_void_v<Tail>) {
+        using DifferentArg = filtered_t<SameArgAtPos<pos, CurrentArg, false>, Tail>;
+        if constexpr (!std::is_void_v<DifferentArg>) {
             return choose_overload<argc, pos>(out, self, args, DifferentArg{}, ready...);
         }
     }
     return false;
 }
 
-template<typename T, auto first, auto...rest>
-bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...> set) {
+template<typename T, auto first, typename Tail>
+bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, Tail> set) {
     constexpr size_t argc = argc_of(first);
-    if constexpr (!argc || !sizeof...(rest)) {
+    if constexpr (!argc || std::is_void_v<Tail>) {
         // special case 1: if no args -> choose first
         // case 2: if one last overload -> choose it
         call_one(out, self, args, first, std::make_index_sequence<argc>());
@@ -164,16 +200,16 @@ bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...> set) {
     }
 }
 
-template<typename T, auto...methods>
-void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
-    constexpr size_t max_args = max_argc(methods...);
+template<typename T, typename Methods>
+void call(Arg* out, T* self, Arg* args, size_t size, Methods methods) {
+    constexpr size_t max_args = max_argc(methods);
     bool hit = false;
     // lambda will be called with std::integral_constant<size_t, i>
     // for i = 0; i < max_args; ++i
     const_for_each(std::make_index_sequence<max_args + 1>(), [&](auto argc){
         if (!hit && size == argc.value) {
-            using SameArgc = filtered_t<CanBeCalledWith<argc.value>, methods...>;
-            if constexpr (SameArgc::count) {
+            using SameArgc = filtered_t<CanBeCalledWith<argc.value>, Methods>;
+            if constexpr (!std::is_void_v<SameArgc>) {
                 hit = call_any(out, self, args, SameArgc{});
             } else {
                 throw "Error: not overload for such argument count";
@@ -241,7 +277,7 @@ struct Victim {
 };
 
 template<typename T>
-using Overloads = OverloadSet<
+using Overloads = make_overload_set_t<
     &Victim<T>::a,
     &Victim<T>::b,
     &Victim<T>::c,
@@ -257,7 +293,8 @@ using Overloads = OverloadSet<
     &Victim<T>::d9,
     &Victim<T>::d10,
     &Victim<T>::d11,
-    &Victim<T>::d12>;
+    &Victim<T>::d12
+>;
 
 template<typename T>
 void inst(Arg& out, Arg* args, size_t count) {
