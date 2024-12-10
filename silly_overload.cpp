@@ -75,27 +75,27 @@ struct CanBeCalledWith {
     }
 };
 
-template<size_t i, typename First, typename...Rest>
-auto item_at_idx(TypeList<First, Rest...>) {
-    if constexpr (!i) return First{};
-    else return item_at_idx<i - 1>(TypeList<Rest...>{});
-}
+template<size_t i, typename Head, typename...Items>
+struct item_at_idx {
+    using type = typename item_at_idx<i - 1, Items...>::type;
+};
 
-template<size_t pos, typename R, typename T, typename...Args>
-auto arg_at_pos(R(T::*)(Args...)) -> decltype(item_at_idx<pos>(TypeList<Args...>{}));
+template<typename Head, typename...Items>
+struct item_at_idx<0, Head, Items...> {
+    using type = Head;
+};
 
-template<size_t pos, typename T, typename C, typename R, typename...Args>
-constexpr bool same_arg_at(R(C::*)(Args...))
-{
-    return std::is_same_v<T, decltype(item_at_idx<pos>(TypeList<Args...>{}))>;
-}
+template<size_t i, typename...Items>
+using item_at_idx_t = typename item_at_idx<i, Items...>::type;
+
+template<size_t pos, typename C, typename R, typename...Args>
+auto arg_at_pos(R(C::*)(Args...)) -> item_at_idx_t<pos, Args...>;
 
 template<size_t pos, typename T, bool is>
 struct SameArgAtPos {
-
-    template<typename Other>
-    static constexpr size_t check(Other) {
-        return same_arg_at<pos, T>(Other{}) == is;
+    template<typename C, typename R, typename...Args>
+    static constexpr size_t check(R(C::*)(Args...)) {
+        return std::is_same_v<T, item_at_idx_t<pos, Args...>> == is;
     }
 };
 
@@ -197,6 +197,7 @@ void call(Arg* out, T* self, Arg* args, size_t size, OverloadSet<methods...>) {
 template<size_t>
 struct Test {};
 
+template<typename>
 struct Victim {
     int a(int a, int b) {
         return a + b;
@@ -248,29 +249,40 @@ struct Victim {
     }
 };
 
+template<typename T>
+using Overloads = OverloadSet<
+    &Victim<T>::a,
+    &Victim<T>::b,
+    &Victim<T>::c,
+    &Victim<T>::d,
+    &Victim<T>::d1,
+    &Victim<T>::d2,
+    &Victim<T>::d3,
+    &Victim<T>::d4,
+    &Victim<T>::d5,
+    &Victim<T>::d6,
+    &Victim<T>::d7,
+    &Victim<T>::d8,
+    &Victim<T>::d9,
+    &Victim<T>::d10,
+    &Victim<T>::d11,
+    &Victim<T>::d12>;
+
+template<typename T>
+void inst(Arg& out, Arg* args, size_t count) {
+    Victim<T> obj;
+    call(&out, &obj, args, count, Overloads<T>{});
+}
+
+template<size_t...Is>
+void inst_all(Arg& out, Arg* args, std::index_sequence<Is...>) {
+    (inst<Test<Is>>(out, args, Is), ...);
+}
+
 int main()
 {
     Arg out;
-    Arg args[5] = {};
-    using Overloads = OverloadSet<
-        &Victim::a,
-        &Victim::b,
-        &Victim::c,
-        &Victim::d,
-        &Victim::d1,
-        &Victim::d2,
-        &Victim::d3,
-        &Victim::d4,
-        &Victim::d5,
-        &Victim::d6,
-        &Victim::d7,
-        &Victim::d8,
-        &Victim::d9,
-        &Victim::d10,
-        &Victim::d11,
-        &Victim::d12>;
-    Victim obj;
-    call(&out, &obj, args, 1, Overloads{});
-    call(&out, &obj, args, 2, Overloads{});
+    Arg args[20] = {};
+    inst_all(out, args, std::make_index_sequence<20>());
     return 0;
 }
