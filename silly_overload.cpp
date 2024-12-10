@@ -127,12 +127,9 @@ constexpr auto get_first() {
     return first;
 }
 
-template<size_t argc, size_t pos, typename T, auto pivot, auto...sameArg, auto...otherArg, typename...Ready>
+template<size_t argc, size_t pos, typename T, auto pivot, auto...other, typename...Ready>
 bool choose_overload(
-    Arg* out, T* self, Arg* args,
-    OverloadSet<pivot, sameArg...> match,
-    OverloadSet<otherArg...> miss,
-    Ready&...ready)
+    Arg* out, T* self, Arg* args, OverloadSet<pivot, other...>, Ready&...ready)
 {
     using CurrentArg = decltype(arg_at_pos<pos>(pivot));
     CurrentArg arg;
@@ -142,19 +139,16 @@ bool choose_overload(
             return true;
         } else {
             using NextArg =  decltype(arg_at_pos<pos + 1>(pivot));
-            using NextSame = filtered_t<SameArgAtPos<pos + 1, NextArg, true>, pivot, sameArg...>;
-            using NextOther = filtered_t<SameArgAtPos<pos + 1, NextArg, false>, pivot, sameArg...>;
-            return choose_overload<argc, pos + 1>(out, self, args, NextSame{}, NextOther{}, ready..., arg);
+            using NextSame = filtered_t<SameArgAtPos<pos + 1, NextArg, true>, pivot, other...>;
+            return choose_overload<argc, pos + 1>(out, self, args, NextSame{}, ready..., arg);
         }
-    } else if constexpr (sizeof...(otherArg)) {
-        constexpr auto new_pivot = get_first<otherArg...>();
-        using ChangeArg = decltype(arg_at_pos<pos>(new_pivot));
-        using ChangeSame = filtered_t<SameArgAtPos<pos, ChangeArg, true>, otherArg...>;
-        using ChangeOther = filtered_t<SameArgAtPos<pos, ChangeArg, false>, otherArg...>;
-        return choose_overload<argc, pos>(out, self, args, ChangeSame{}, ChangeOther{}, ready...);
-    } else {
-        return false;
+    } else if constexpr (sizeof...(other)) {
+        using DifferentArg = filtered_t<SameArgAtPos<pos, CurrentArg, false>, other...>;
+        if constexpr (DifferentArg::count) {
+            return choose_overload<argc, pos>(out, self, args, DifferentArg{}, ready...);
+        }
     }
+    return false;
 }
 
 template<typename T, auto first, auto...rest>
@@ -166,10 +160,7 @@ bool call_any(Arg* out, T* self, Arg* args, OverloadSet<first, rest...> set) {
         call_one(out, self, args, first, std::make_index_sequence<argc>());
         return true;
     } else {
-        using Arg0 = decltype(arg_at_pos<0>(first));
-        using Same = filtered_t<SameArgAtPos<0, Arg0, true>, first, rest...>;
-        using Other = filtered_t<SameArgAtPos<0, Arg0, false>, first, rest...>;
-        return choose_overload<argc, 0>(out, self, args, Same{}, Other{});
+        return choose_overload<argc, 0>(out, self, args, set);
     }
 }
 
